@@ -6,12 +6,11 @@ yt-dlp>=2026.7
 youtube-transcript-api>=1.2,<2
 ffmpeg-python>=0.2.0
 
-# Speech-to-text
-openai-whisper
-# Keep the PyTorch family pinned together to avoid ABI/operator mismatches on hosted Linux.
+# Speech-to-text — compatible PyTorch family for Python 3.12
 torch==2.7.1
 torchaudio==2.7.1
 torchvision==0.22.1
+openai-whisper
 
 # Translation / API
 requests>=2.32.0
