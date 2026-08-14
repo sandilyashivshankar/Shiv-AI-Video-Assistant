@@ -1,22 +1,29 @@
-streamlit
-python-dotenv
+streamlit>=1.40,<2
+python-dotenv>=1.0,<2
 
-yt-dlp
-pydub
-ffmpeg-python
+# Audio / video
+yt-dlp>=2026.7
+pydub>=0.25.1
+ffmpeg-python>=0.2.0
 
+# Speech-to-text
 openai-whisper
 torch
 torchaudio
 
-deep-translator
+# Translation / API
+requests>=2.32.0
+deep-translator>=1.11.4
 
+# LangChain / Mistral
 langchain
 langchain-core
 langchain-community
 langchain-mistralai
+langchain-text-splitters
 mistralai
 
+# RAG
 chromadb
 sentence-transformers
 langchain-huggingface
@@ -24,9 +31,10 @@ huggingface-hub
 tiktoken
 langchain-chroma
 
+# Export
 reportlab
 fpdf2
 
+# Utilities
 numpy
 tqdm
-requests
