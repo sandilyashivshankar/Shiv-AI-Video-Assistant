@@ -3,6 +3,7 @@ python-dotenv>=1.0,<2
 
 # Audio / video
 yt-dlp>=2026.7
+youtube-transcript-api>=1.2,<2
 ffmpeg-python>=0.2.0
 
 # Speech-to-text
