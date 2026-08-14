@@ -42,9 +42,11 @@ def _youtube_video_id(url: str) -> str:
         if parsed.path == "/watch":
             return parse_qs(parsed.query).get("v", [""])[0]
         if parsed.path.startswith("/shorts/"):
-            return parsed.path.split("/")[2]
+            parts = parsed.path.strip("/").split("/")
+            return parts[1] if len(parts) > 1 else ""
         if parsed.path.startswith("/embed/"):
-            return parsed.path.split("/")[2]
+            parts = parsed.path.strip("/").split("/")
+            return parts[1] if len(parts) > 1 else ""
 
     return ""
 
@@ -54,7 +56,9 @@ def _is_youtube_url(url: str) -> bool:
 
 
 def _cookies_file() -> str | None:
+    """Load optional authenticated YouTube cookies from env/Streamlit Secrets."""
     encoded = os.getenv("YOUTUBE_COOKIES_B64")
+
     if not encoded:
         try:
             import streamlit as st
@@ -66,14 +70,18 @@ def _cookies_file() -> str | None:
         return None
 
     path = DOWNLOAD_DIR / ".youtube_cookies.txt"
+
     try:
-        path.write_bytes(base64.b64decode(str(encoded)))
+        path.write_bytes(base64.b64decode(str(encoded), validate=True))
         return str(path)
     except Exception as exc:
-        raise RuntimeError("YOUTUBE_COOKIES_B64 is not valid base64 cookie data.") from exc
+        raise RuntimeError(
+            "YOUTUBE_COOKIES_B64 is not valid base64 cookie data."
+        ) from exc
 
 
-def _youtube_options(output_template: str, player_client: str) -> dict:
+def _youtube_options(output_template: str, player_clients: list[str]) -> dict:
+    """Build a yt-dlp profile suitable for hosted/cloud environments."""
     opts = {
         "format": "bestaudio[protocol=m3u8_native]/bestaudio/best",
         "outtmpl": output_template,
@@ -87,7 +95,7 @@ def _youtube_options(output_template: str, player_client: str) -> dict:
         "source_address": "0.0.0.0",
         "extractor_args": {
             "youtube": {
-                "player_client": [player_client],
+                "player_client": player_clients,
             }
         },
         "postprocessors": [
@@ -107,12 +115,7 @@ def _youtube_options(output_template: str, player_client: str) -> dict:
 
 
 def _fetch_youtube_transcript(url: str) -> str | None:
-    """Fallback for Cloud deployments where YouTube blocks media downloads.
-
-    This uses captions/transcripts rather than downloading the protected media.
-    It is only a fallback: videos without an accessible transcript still require
-    the normal yt-dlp path or an uploaded media file.
-    """
+    """Try YouTube captions when Cloud media downloads are blocked."""
     if YouTubeTranscriptApi is None:
         return None
 
@@ -121,150 +124,293 @@ def _fetch_youtube_transcript(url: str) -> str | None:
         return None
 
     api = YouTubeTranscriptApi()
-    errors = []
 
-    for languages in (["en", "hi"], ["en"], ["hi"]):
+    language_sets = [
+        ["en", "hi"],
+        ["en"],
+        ["hi"],
+    ]
+
+    for languages in language_sets:
         try:
-            transcript = api.fetch(video_id, languages=languages)
-            text = " ".join(
-                snippet.text.strip()
-                for snippet in transcript
-                if getattr(snippet, "text", "").strip()
-            ).strip()
+            transcript = api.fetch(
+                video_id,
+                languages=languages,
+            )
+
+            parts = []
+            for snippet in transcript:
+                text = getattr(snippet, "text", "").strip()
+                if text:
+                    parts.append(text)
+
+            text = " ".join(parts).strip()
 
             if text:
-                output = DOWNLOAD_DIR / f"youtube_{video_id}_transcript.txt"
-                output.write_text(text, encoding="utf-8")
-                return str(output)
-        except Exception as exc:
-            errors.append(str(exc))
+                output = (
+                    DOWNLOAD_DIR
+                    / f"youtube_{video_id}_transcript.txt"
+                )
 
-    print("YouTube transcript fallback failed:", " | ".join(errors[-2:]))
+                output.write_text(
+                    text,
+                    encoding="utf-8",
+                )
+
+                return str(output)
+
+        except Exception:
+            continue
+
     return None
 
 
 def download_youtube_audio(url: str) -> str:
-    """Download YouTube audio with cloud fallbacks and transcript fallback."""
+    """Try authenticated/direct download, then a YouTube transcript fallback."""
     _ffmpeg()
-    output_template = str(DOWNLOAD_DIR / "%(title)s.%(ext)s")
 
-    profiles = ["web_safari", "web_embedded", "tv"]
+    output_template = str(
+        DOWNLOAD_DIR / "%(title)s.%(ext)s"
+    )
+
+    # Current yt-dlp documentation identifies android_vr and web_safari as
+    # useful default clients. When authenticated cookies are available, yt-dlp
+    # can use web-based clients with the session; otherwise the fallback clients
+    # are tried without claiming to bypass YouTube authentication.
+    profiles = [
+        ["android_vr"],
+        ["web_safari"],
+        ["web_embedded"],
+    ]
+
     errors = []
 
-    for client in profiles:
+    for clients in profiles:
         try:
-            print(f"Trying YouTube client: {client}")
-            opts = _youtube_options(output_template, client)
+            label = ",".join(clients)
+            print(f"Trying YouTube client: {label}")
+
+            opts = _youtube_options(
+                output_template,
+                clients,
+            )
 
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                downloaded = Path(ydl.prepare_filename(info)).with_suffix(".wav")
+                info = ydl.extract_info(
+                    url,
+                    download=True,
+                )
+
+                downloaded = Path(
+                    ydl.prepare_filename(info)
+                ).with_suffix(".wav")
 
             if downloaded.exists():
                 return str(downloaded)
 
-            title = _safe_filename(info.get("title", "youtube_audio"))
-            matches = sorted(DOWNLOAD_DIR.glob(f"{title}*.wav"))
+            title = _safe_filename(
+                info.get("title", "youtube_audio")
+            )
+
+            matches = sorted(
+                DOWNLOAD_DIR.glob(
+                    f"{title}*.wav"
+                )
+            )
+
             if matches:
                 return str(matches[-1])
 
-            errors.append(f"{client}: WAV output was not found")
+            errors.append(
+                f"{label}: WAV output was not found"
+            )
 
         except Exception as exc:
-            errors.append(f"{client}: {exc}")
-            print(f"YouTube client {client} failed: {exc}")
+            errors.append(
+                f"{','.join(clients)}: {exc}"
+            )
+            print(
+                f"YouTube client {','.join(clients)} failed: {exc}"
+            )
 
-    # Important for Streamlit Cloud: YouTube may reject the data-center IP even
-    # when the same URL works locally. Try captions before giving up.
+    # Cloud IPs may be blocked even when local browser downloads work.
+    # A public caption track can still let the downstream AI pipeline work.
     transcript_path = _fetch_youtube_transcript(url)
+
     if transcript_path:
         return transcript_path
 
-    detail = "\n".join(errors[-3:])
+    details = "\n".join(errors[-3:])
+
     raise RuntimeError(
-        "YouTube blocked media download from the Streamlit Cloud server and "
-        "no accessible YouTube transcript was found. Upload the video/audio "
-        "file instead, or configure authenticated cookies if you control the "
-        "video account.\nDetails:\n" + detail
+        "YouTube blocked the media download from the Streamlit Cloud server "
+        "and no accessible transcript was found. This is a YouTube-side "
+        "authentication/anti-bot restriction, not an FFmpeg or Python error. "
+        "Upload the video/audio file for guaranteed processing, or configure "
+        "your own authenticated YouTube cookies in Streamlit Secrets if you "
+        "control the account.\n\n"
+        f"Details:\n{details}"
     )
 
 
 def convert_to_wav(input_path: str) -> str:
+    """Convert any audio/video file to mono 16 kHz WAV using FFmpeg."""
     ffmpeg = _ffmpeg()
 
     if not os.path.isfile(input_path):
-        raise FileNotFoundError(f"Input file not found: {input_path}")
+        raise FileNotFoundError(
+            f"Input file not found: {input_path}"
+        )
 
     output_path = str(
         Path(input_path).with_name(
-            Path(input_path).stem + "_converted.wav"
+            Path(input_path).stem
+            + "_converted.wav"
         )
     )
 
     command = [
-        ffmpeg, "-y", "-i", input_path, "-vn",
-        "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+        ffmpeg,
+        "-y",
+        "-i", input_path,
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
         output_path,
     ]
 
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg conversion failed: {result.stderr[-2000:]}")
+        raise RuntimeError(
+            "FFmpeg conversion failed: "
+            f"{result.stderr[-2000:]}"
+        )
 
     return output_path
 
 
-def chunk_audio(wav_path: str, chunk_minutes: int = 10) -> list:
+def chunk_audio(
+    wav_path: str,
+    chunk_minutes: int = 10,
+) -> list:
+    """Split WAV audio into fixed-length WAV chunks using FFmpeg."""
     ffmpeg = _ffmpeg()
 
     if not os.path.isfile(wav_path):
-        raise FileNotFoundError(f"WAV file not found: {wav_path}")
+        raise FileNotFoundError(
+            f"WAV file not found: {wav_path}"
+        )
 
     chunk_seconds = chunk_minutes * 60
-    output_pattern = f"{wav_path}_chunk_%03d.wav"
+
+    output_pattern = (
+        f"{wav_path}_chunk_%03d.wav"
+    )
 
     command = [
-        ffmpeg, "-y", "-i", wav_path,
-        "-f", "segment", "-segment_time", str(chunk_seconds),
-        "-reset_timestamps", "1", "-ac", "1", "-ar", "16000",
-        "-c:a", "pcm_s16le", output_pattern,
+        ffmpeg,
+        "-y",
+        "-i", wav_path,
+        "-f", "segment",
+        "-segment_time", str(chunk_seconds),
+        "-reset_timestamps", "1",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
+        output_pattern,
     ]
 
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg chunking failed: {result.stderr[-2000:]}")
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
 
-    chunks = sorted(Path(wav_path).parent.glob(Path(output_pattern).name))
+    if result.returncode != 0:
+        raise RuntimeError(
+            "FFmpeg chunking failed: "
+            f"{result.stderr[-2000:]}"
+        )
+
+    chunks = sorted(
+        Path(wav_path).parent.glob(
+            Path(output_pattern).name
+        )
+    )
+
     if not chunks:
-        raise RuntimeError("FFmpeg completed but no audio chunks were created.")
+        raise RuntimeError(
+            "FFmpeg completed but no audio chunks were created."
+        )
 
     return [str(path) for path in chunks]
 
 
 def process_input(source: str) -> list:
+    """Process a YouTube URL or local audio/video file."""
     source = source.strip()
 
     if not source:
-        raise ValueError("Input source cannot be empty.")
+        raise ValueError(
+            "Input source cannot be empty."
+        )
 
-    if source.startswith(("http://", "https://")):
+    if source.startswith(
+        ("http://", "https://")
+    ):
+
         if not _is_youtube_url(source):
-            raise ValueError("Only YouTube URLs are supported for URL input.")
+            raise ValueError(
+                "Only YouTube URLs are supported for URL input."
+            )
 
-        print("Detected YouTube URL. Downloading audio...")
-        result_path = download_youtube_audio(source)
+        print(
+            "Detected YouTube URL. "
+            "Downloading audio..."
+        )
 
-        # Transcript fallback produces a text file, so it must not be passed
-        # through FFmpeg/chunking.
+        result_path = download_youtube_audio(
+            source
+        )
+
+        # Caption fallback returns text directly. The current downstream
+        # transcriber expects WAV files, so signal this explicitly instead of
+        # passing a TXT file into FFmpeg/Whisper.
         if result_path.lower().endswith(".txt"):
-            return [result_path]
+            raise RuntimeError(
+                "A YouTube transcript was found, but this deployment's "
+                "current transcription pipeline expects audio chunks. "
+                "Please upload the video/audio file, or enable transcript "
+                "as a direct text-analysis path."
+            )
 
         wav_path = result_path
+
     else:
-        print("Detected local file. Converting to WAV...")
-        wav_path = convert_to_wav(source)
+
+        print(
+            "Detected local file. "
+            "Converting to WAV..."
+        )
+
+        wav_path = convert_to_wav(
+            source
+        )
 
     print("Chunking audio...")
-    chunks = chunk_audio(wav_path)
-    print(f"Audio ready — {len(chunks)} chunk(s) created.")
+
+    chunks = chunk_audio(
+        wav_path
+    )
+
+    print(
+        f"Audio ready — {len(chunks)} chunk(s) created."
+    )
+
     return chunks
